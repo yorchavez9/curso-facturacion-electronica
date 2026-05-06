@@ -81,8 +81,13 @@ $invoice->setDetails([$item])
 
 $result = $see->send($invoice);
 
+$dir_facturas = __DIR__.'/facturas/';
+if (!is_dir($dir_facturas)) {
+    mkdir($dir_facturas, 0755, true);
+}
+
 // Guardar XML firmado digitalmente.
-file_put_contents($invoice->getName().'.xml',
+file_put_contents($dir_facturas.$invoice->getName().'.xml',
                   $see->getFactory()->getLastXml());
 
 // Verificamos que la conexión con SUNAT fue exitosa.
@@ -94,7 +99,7 @@ if (!$result->isSuccess()) {
 }
 
 // Guardamos el CDR
-file_put_contents('R-'.$invoice->getName().'.zip', $result->getCdrZip());
+file_put_contents($dir_facturas.'R-'.$invoice->getName().'.zip', $result->getCdrZip());
 
 
 
@@ -119,14 +124,26 @@ if ($code === 0) {
 
 echo $cdr->getDescription().PHP_EOL;
 
-// ── Generar PDF de la factura ─────────────────────────────────────────────────
+// ── Generar PDFs de la factura (A4 y ticket 80mm) ────────────────────────────
 
-$addr      = $company->getAddress();
-$simbolo   = $invoice->getTipoMoneda() === 'PEN' ? 'S/' : '$';
+$addr          = $company->getAddress();
+$simbolo       = $invoice->getTipoMoneda() === 'PEN' ? 'S/' : '$';
+$fecha_emision = $invoice->getFechaEmision()->format('Y-m-d');
+$fmt_gravadas  = number_format($invoice->getMtoOperGravadas(), 2);
+$fmt_igv       = number_format($invoice->getMtoIGV(), 2);
+$fmt_importe   = number_format($invoice->getMtoImpVenta(), 2);
+$serie_fmt     = $invoice->getSerie().'-'.str_pad($invoice->getCorrelativo(), 8, '0', STR_PAD_LEFT);
 
-$filas_items = '';
+$leyendas_texto = '';
+foreach ($invoice->getLegends() as $leg) {
+    if ($leg->getCode() === '1000') { $leyendas_texto = $leg->getValue(); break; }
+}
+
+// ── HTML A4 ───────────────────────────────────────────────────────────────────
+
+$filas_a4 = '';
 foreach ($invoice->getDetails() as $det) {
-    $filas_items .= '<tr>'
+    $filas_a4 .= '<tr>'
         .'<td>'.$det->getCodProducto().'</td>'
         .'<td>'.$det->getDescripcion().'</td>'
         .'<td style="text-align:center">'.$det->getUnidad().'</td>'
@@ -138,22 +155,8 @@ foreach ($invoice->getDetails() as $det) {
         .'</tr>';
 }
 
-$leyendas_texto = '';
-foreach ($invoice->getLegends() as $leg) {
-    if ($leg->getCode() === '1000') {
-        $leyendas_texto = $leg->getValue();
-        break;
-    }
-}
-
-$fmt_gravadas = number_format($invoice->getMtoOperGravadas(), 2);
-$fmt_igv      = number_format($invoice->getMtoIGV(), 2);
-$fmt_importe  = number_format($invoice->getMtoImpVenta(), 2);
-$fecha_emision = $invoice->getFechaEmision()->format('Y-m-d');
-
-$html_pdf = '<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="UTF-8">
+$html_a4 = '<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body { font-family: Arial, sans-serif; font-size: 11px; color: #222; }
@@ -188,8 +191,7 @@ $html_pdf = '<!DOCTYPE html>
   .totales-col .t-value { text-align:right; font-weight:bold; }
   .totales-col .t-total td { background:#1a5276; color:#fff; font-weight:bold; font-size:11px; }
   .footer { margin-top:30px; font-size:9px; color:#888; text-align:center; border-top:1px solid #ccc; padding-top:8px; }
-</style>
-</head>
+</style></head>
 <body><div class="page">
 
   <div class="header">
@@ -207,7 +209,7 @@ $html_pdf = '<!DOCTYPE html>
         <div class="tipo">FACTURA ELECTRÓNICA</div>
         <div class="ruc-label">R.U.C.</div>
         <div class="ruc-num">'.$company->getRuc().'</div>
-        <div class="serie">'.$invoice->getSerie().'-'.str_pad($invoice->getCorrelativo(), 8, '0', STR_PAD_LEFT).'</div>
+        <div class="serie">'.$serie_fmt.'</div>
       </div>
     </div>
   </div>
@@ -231,7 +233,7 @@ $html_pdf = '<!DOCTYPE html>
         <th>Código</th><th>Descripción</th><th>Unidad</th><th>Cantidad</th>
         <th>P. Unitario</th><th>Valor Venta</th><th>IGV</th><th>Total</th>
       </tr></thead>
-      <tbody>'.$filas_items.'</tbody>
+      <tbody>'.$filas_a4.'</tbody>
     </table>
   </div>
 
@@ -252,13 +254,114 @@ $html_pdf = '<!DOCTYPE html>
 
 </div></body></html>';
 
+// ── HTML 80mm (ticket térmico) ────────────────────────────────────────────────
+
+$filas_ticket = '';
+foreach ($invoice->getDetails() as $det) {
+    $total_item = $det->getMtoValorVenta() + $det->getIgv();
+    $filas_ticket .= '<tr>'
+        .'<td class="desc">'.$det->getDescripcion().'<br><span class="sub">'.$det->getCantidad().' x '.number_format($det->getMtoPrecioUnitario(), 2).'</span></td>'
+        .'<td class="monto">'.number_format($total_item, 2).'</td>'
+        .'</tr>';
+}
+
+$html_ticket = '<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: Arial, sans-serif; font-size: 8px; color: #000; width: 72mm; }
+  .page { padding: 4mm 3mm; }
+  .center { text-align: center; }
+  .emisor-nombre { font-size:11px; font-weight:bold; }
+  .emisor-info   { font-size:7px; line-height:1.5; margin-bottom:3mm; }
+  .tipo-doc { font-size:9px; font-weight:bold; border:1px solid #000; padding:2px 4px; display:inline-block; margin:2mm 0; }
+  .serie    { font-size:9px; font-weight:bold; }
+  .sep      { border:none; border-top:1px dashed #000; margin:2mm 0; }
+  .datos    { font-size:7px; line-height:1.6; margin-bottom:2mm; }
+  .datos .lbl { font-weight:bold; }
+  table.items { width:100%; border-collapse:collapse; margin:2mm 0; }
+  table.items th { font-size:7px; border-bottom:1px solid #000; padding:1px 2px; text-align:left; }
+  table.items th.monto { text-align:right; }
+  table.items td { font-size:7px; padding:2px 2px; vertical-align:top; }
+  table.items td.desc  { width:75%; }
+  table.items td.monto { width:25%; text-align:right; }
+  table.items .sub { color:#555; font-size:6.5px; }
+  .totales { width:100%; border-collapse:collapse; margin-top:1mm; }
+  .totales td { font-size:7px; padding:1px 2px; }
+  .totales .lbl { text-align:left; }
+  .totales .val { text-align:right; }
+  .totales .total-row td { font-weight:bold; font-size:8.5px; border-top:1px solid #000; padding-top:2px; }
+  .leyenda { font-size:6.5px; font-style:italic; margin-top:2mm; text-align:center; }
+  .footer  { font-size:6px; color:#555; text-align:center; margin-top:3mm; border-top:1px dashed #000; padding-top:2mm; }
+</style></head>
+<body><div class="page">
+
+  <div class="center">
+    <div class="emisor-nombre">'.$company->getRazonSocial().'</div>
+    <div class="emisor-info">
+      RUC: '.$company->getRuc().'<br>
+      '.$addr->getDireccion().'<br>
+      '.$addr->getDistrito().' - '.$addr->getProvincia().'
+    </div>
+    <div class="tipo-doc">FACTURA ELECTRÓNICA</div><br>
+    <div class="serie">'.$serie_fmt.'</div>
+  </div>
+
+  <hr class="sep">
+
+  <div class="datos">
+    <span class="lbl">Cliente:</span> '.$client->getRznSocial().'<br>
+    <span class="lbl">RUC:</span> '.$client->getNumDoc().'<br>
+    <span class="lbl">Fecha:</span> '.$fecha_emision.'<br>
+    <span class="lbl">Moneda:</span> '.$invoice->getTipoMoneda().'
+  </div>
+
+  <hr class="sep">
+
+  <table class="items">
+    <thead><tr><th>Descripción</th><th class="monto">Total</th></tr></thead>
+    <tbody>'.$filas_ticket.'</tbody>
+  </table>
+
+  <hr class="sep">
+
+  <table class="totales">
+    <tr><td class="lbl">Op. Gravadas</td><td class="val">'.$simbolo.' '.$fmt_gravadas.'</td></tr>
+    <tr><td class="lbl">IGV 18%</td><td class="val">'.$simbolo.' '.$fmt_igv.'</td></tr>
+    <tr class="total-row"><td class="lbl">TOTAL A PAGAR</td><td class="val">'.$simbolo.' '.$fmt_importe.'</td></tr>
+  </table>
+
+  <div class="leyenda">'.$leyendas_texto.'</div>
+
+  <div class="footer">
+    Representación impresa de Factura Electrónica<br>
+    Autorizado mediante R.S. N.° 300-2014/SUNAT
+  </div>
+
+</div></body></html>';
+
+// ── Renderizar A4 ─────────────────────────────────────────────────────────────
+
 $opts = new Options();
 $opts->set('defaultFont', 'Arial');
-$pdf = new Dompdf($opts);
-$pdf->loadHtml($html_pdf);
-$pdf->setPaper('A4', 'portrait');
-$pdf->render();
 
-$pdf_nombre = $invoice->getName().'.pdf';
-file_put_contents(__DIR__.'/'.$pdf_nombre, $pdf->output());
-echo 'PDF generado: '.$pdf_nombre.PHP_EOL;
+$pdf_a4 = new Dompdf($opts);
+$pdf_a4->loadHtml($html_a4);
+$pdf_a4->setPaper('A4', 'portrait');
+$pdf_a4->render();
+
+$nombre_a4 = $invoice->getName().'_A4.pdf';
+file_put_contents($dir_facturas.$nombre_a4, $pdf_a4->output());
+echo 'PDF A4 generado:    facturas/'.$nombre_a4.PHP_EOL;
+
+// ── Renderizar 80mm ───────────────────────────────────────────────────────────
+
+// 80mm x 200mm en puntos (1mm = 2.8346 pts)
+$pdf_ticket = new Dompdf($opts);
+$pdf_ticket->loadHtml($html_ticket);
+$pdf_ticket->setPaper([0, 0, 226.77, 566.93], 'portrait');
+$pdf_ticket->render();
+
+$nombre_ticket = $invoice->getName().'_80mm.pdf';
+file_put_contents($dir_facturas.$nombre_ticket, $pdf_ticket->output());
+echo 'PDF 80mm generado:  facturas/'.$nombre_ticket.PHP_EOL;
