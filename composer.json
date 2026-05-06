@@ -1,5 +1,6 @@
 {
     "require": {
-        "greenter/lite": "^5.2"
+        "greenter/lite": "^5.2",
+        "dompdf/dompdf": "^3.1"
     }
 }
